@@ -1,0 +1,99 @@
+# Builds the Unigata FFmpeg for every target. Publishing a release is a manual choice (run it with "publish" ticked); a normal run
+# only builds and uploads the files as workflow artifacts so they can be looked at first.
+name: build-ffmpeg
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create a GitHub release from this build"
+        type: boolean
+        default: false
+  push:
+    paths: ["build.sh", "versions.env", "sources.sh", ".github/workflows/build.yml"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: windows-x64, runner: windows-latest }
+          - { target: linux-x64,   runner: ubuntu-latest }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: macos-arm64, runner: macos-latest }
+          - { target: macos-x64,   runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: ${{ matrix.target == 'windows-x64' && 'msys2 {0}' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: MSYS2 toolchain (Windows)
+        if: matrix.target == 'windows-x64'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git make zip diffutils patch tar xz curl gnupg
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+      - name: Tools (Linux)
+        if: startsWith(matrix.target, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y nasm cmake pkg-config gnupg xz-utils
+      - name: Tools (macOS)
+        if: startsWith(matrix.target, 'macos')
+        run: brew install nasm cmake pkg-config gnupg
+      - name: Build
+        run: bash ./build.sh ${{ matrix.target }}
+      - name: Keep the log even when it fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ matrix.target }}
+          path: |
+            work/${{ matrix.target }}/config.log
+            work/${{ matrix.target }}/version.txt
+            work/${{ matrix.target }}/encoders.txt
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: dist/*
+
+  sources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash ./sources.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sources
+          path: dist/*
+
+  release:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    needs: [build, sources]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{ffmpeg-*,sources}"
+          path: out
+          merge-multiple: true
+      - name: One checksum list for the whole release (the Enhancer reads this)
+        working-directory: out
+        run: |
+          rm -f checksums.sha256
+          for f in unigata-ffmpeg-*.zip unigata-ffmpeg-*.tar.xz; do sha256sum "$f" >> checksums.sha256; done
+          cat checksums.sha256
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . ./versions.env
+          gh release create "v${FFMPEG_VERSION}-${UNIGATA_BUILD}" out/* --title "Unigata FFmpeg ${FFMPEG_VERSION}-${UNIGATA_BUILD}" \
+            --notes "FFmpeg ${FFMPEG_VERSION}, LGPL, built from pinned source. See COMPLIANCE.md inside each archive. Provided as is."
