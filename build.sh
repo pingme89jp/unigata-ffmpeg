@@ -163,7 +163,7 @@ CONFIGURE_LINE=(
   --enable-encoder=mpeg2video
   "${CONF[@]}"
 )
-./configure "${CONFIGURE_LINE[@]}"
+./configure "${CONFIGURE_LINE[@]}" || { cp ffbuild/config.log "$WORK/config.log" 2>/dev/null; tail -60 ffbuild/config.log; exit 1; }
 
 say "FFmpeg build"
 make -j"$JOBS"
@@ -173,6 +173,13 @@ cp ffbuild/config.log "$WORK/config.log" 2>/dev/null || true
 # ----------------------------------------------------------------------------------------------------------------- prove it
 say "Proving the program: licence, encoders, and a real encode"
 OUT="$WORK/ffmpeg-out/bin/$EXE"
+# The program needs Cisco's OpenH264 library next to it to start, so the test uses the very file the Enhancer will fetch.
+# On Linux the library is found through LD_LIBRARY_PATH (the Enhancer sets it to the program's folder when it starts ffmpeg).
+if [ -n "$OPENH264_LIB" ]; then
+  bunzip2 -c "$SRC/$BIN_FILE" > "$WORK/ffmpeg-out/bin/$OPENH264_LIB"
+  chmod +x "$WORK/ffmpeg-out/bin/$OPENH264_LIB"
+fi
+export LD_LIBRARY_PATH="$WORK/ffmpeg-out/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 "$OUT" -hide_banner -version | tee "$WORK/version.txt"
 grep -q -i "enable-gpl\|enable-nonfree\|enable-version3" "$WORK/version.txt" && { echo "NOT LGPL: configure line has a GPL/nonfree/version3 flag" >&2; exit 1; }
 "$OUT" -hide_banner -encoders 2>/dev/null | tee "$WORK/encoders.txt" | grep -E "libmp3lame|mpeg2video" >/dev/null \
